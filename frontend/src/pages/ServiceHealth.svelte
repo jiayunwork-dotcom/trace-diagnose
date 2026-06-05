@@ -20,6 +20,8 @@
     getCapacityPlans,
     getHealthEvents,
     computeHealthNow,
+    getWeightConfig,
+    updateWeightConfig,
   } from '../api.js'
 
   ChartJS.register(
@@ -41,6 +43,8 @@
   let trendData = []
   let loading = true
   let activeTab = 'rankings'
+  let weightConfig = null
+  let savingWeights = false
 
   onMount(async () => {
     await loadAllData()
@@ -85,13 +89,69 @@
     }
   }
 
+  async function loadWeightConfig(serviceName) {
+    try {
+      const res = await getWeightConfig(serviceName)
+      weightConfig = {
+        availability: Math.round(res.data.availability_weight * 100),
+        latency: Math.round(res.data.latency_weight * 100),
+        throughput: Math.round(res.data.throughput_weight * 100),
+        errorDiversity: Math.round(res.data.error_diversity_weight * 100),
+      }
+    } catch (e) {
+      weightConfig = {
+        availability: 40,
+        latency: 30,
+        throughput: 20,
+        errorDiversity: 10,
+      }
+    }
+  }
+
+  async function saveWeightConfig() {
+    const total = weightConfig.availability + weightConfig.latency + weightConfig.throughput + weightConfig.errorDiversity
+    if (Math.abs(total - 100) > 1) {
+      alert('权重之和必须等于100%')
+      return
+    }
+    return updateWeightConfig(selectedService.service_name, {
+      availability_weight: weightConfig.availability / 100,
+      latency_weight: weightConfig.latency / 100,
+      throughput_weight: weightConfig.throughput / 100,
+      error_diversity_weight: weightConfig.errorDiversity / 100,
+    })
+  }
+
+  function onWeightChange(dimension, newValue) {
+    const oldValue = weightConfig[dimension]
+    const diff = newValue - oldValue
+    weightConfig[dimension] = newValue
+
+    const otherKeys = ['availability', 'latency', 'throughput', 'errorDiversity'].filter(k => k !== dimension)
+    const otherTotal = otherKeys.reduce((sum, k) => sum + weightConfig[k], 0)
+
+    if (otherTotal > 0) {
+      let remaining = 100 - newValue
+      otherKeys.forEach(key => {
+        const ratio = weightConfig[key] / otherTotal
+        weightConfig[key] = Math.round(remaining * ratio)
+      })
+    }
+
+    weightConfig = { ...weightConfig }
+  }
+
   async function selectService(service) {
     if (selectedService?.service_name === service.service_name) {
       selectedService = null
       trendData = []
+      weightConfig = null
     } else {
       selectedService = service
-      await loadServiceTrend(service.service_name)
+      await Promise.all([
+        loadServiceTrend(service.service_name),
+        loadWeightConfig(service.service_name),
+      ])
     }
   }
 
@@ -353,6 +413,81 @@
                         <div class="empty-small">暂无趋势数据</div>
                       {/if}
                     </div>
+                    <div class="detail-section weight-section">
+                      <h4>权重配置</h4>
+                      {#if weightConfig}
+                        <div class="weight-config">
+                          <div class="weight-item">
+                            <div class="weight-label">
+                              <span>可用性</span>
+                              <span class="weight-value">{weightConfig.availability}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              bind:value={weightConfig.availability}
+                              on:input={(e) => onWeightChange('availability', parseInt(e.target.value))}
+                            />
+                          </div>
+                          <div class="weight-item">
+                            <div class="weight-label">
+                              <span>延迟</span>
+                              <span class="weight-value">{weightConfig.latency}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              bind:value={weightConfig.latency}
+                              on:input={(e) => onWeightChange('latency', parseInt(e.target.value))}
+                            />
+                          </div>
+                          <div class="weight-item">
+                            <div class="weight-label">
+                              <span>吞吐稳定</span>
+                              <span class="weight-value">{weightConfig.throughput}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              bind:value={weightConfig.throughput}
+                              on:input={(e) => onWeightChange('throughput', parseInt(e.target.value))}
+                            />
+                          </div>
+                          <div class="weight-item">
+                            <div class="weight-label">
+                              <span>错误多样</span>
+                              <span class="weight-value">{weightConfig.errorDiversity}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="100"
+                              bind:value={weightConfig.errorDiversity}
+                              on:input={(e) => onWeightChange('errorDiversity', parseInt(e.target.value))}
+                            />
+                          </div>
+                          <div class="weight-total">
+                            <span>合计: {weightConfig.availability + weightConfig.latency + weightConfig.throughput + weightConfig.errorDiversity}%</span>
+                          </div>
+                          <button class="save-weight-btn" disabled={savingWeights} on:click={async () => {
+                            savingWeights = true
+                            try {
+                              await saveWeightConfig()
+                              alert('权重配置已保存，下次计算健康评分时生效')
+                            } catch (e) {
+                              alert('保存失败')
+                            } finally {
+                              savingWeights = false
+                            }
+                          }}>
+                            {savingWeights ? '保存中...' : '保存权重配置'}
+                          </button>
+                        </div>
+                      {/if}
+                    </div>
                   </div>
                 {/if}
               </div>
@@ -373,6 +508,8 @@
                   <th>当前QPS</th>
                   <th>预估最大QPS</th>
                   <th>剩余容量</th>
+                  <th>预测趋势</th>
+                  <th>预计饱和时间</th>
                   <th>平均响应时间</th>
                   <th>并发峰值(P95)</th>
                   <th>状态</th>
@@ -380,7 +517,7 @@
               </thead>
               <tbody>
                 {#each capacityPlans as plan}
-                  <tr class:warning={plan.is_warning}>
+                  <tr class:warning={plan.is_warning || plan.hours_to_saturation !== null}>
                     <td>{plan.service_name}</td>
                     <td>{plan.current_qps.toFixed(2)}</td>
                     <td>{plan.max_qps.toFixed(2)}</td>
@@ -389,11 +526,31 @@
                         {plan.remaining_capacity.toFixed(2)}
                       </span>
                     </td>
+                    <td>
+                      {#if plan.trend_direction === 'rising'}
+                        <span class="trend-icon trend-up">📈 上升</span>
+                      {:else if plan.trend_direction === 'falling'}
+                        <span class="trend-icon trend-down">📉 下降</span>
+                      {:else}
+                        <span class="trend-icon trend-stable">➡️ 平稳</span>
+                      {/if}
+                    </td>
+                    <td>
+                      {#if plan.hours_to_saturation !== null && plan.hours_to_saturation !== undefined}
+                        <span class="badge badge-warning">
+                          {plan.hours_to_saturation}小时后饱和
+                        </span>
+                      {:else}
+                        <span class="text-muted">-</span>
+                      {/if}
+                    </td>
                     <td>{plan.avg_response_time_ms.toFixed(0)}ms</td>
                     <td>{plan.concurrent_peak_p95}</td>
                     <td>
                       {#if plan.is_warning}
                         <span class="badge badge-danger">容量预警</span>
+                      {:else if plan.hours_to_saturation !== null && plan.hours_to_saturation !== undefined}
+                        <span class="badge badge-warning">即将饱和</span>
                       {:else}
                         <span class="badge badge-success">正常</span>
                       {/if}
@@ -633,6 +790,10 @@
     gap: 20px;
   }
 
+  .detail-section.weight-section {
+    grid-column: span 2;
+  }
+
   .detail-section h4 {
     font-size: 14px;
     font-weight: 600;
@@ -642,6 +803,109 @@
 
   .chart-container {
     height: 250px;
+  }
+
+  .weight-config {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .weight-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .weight-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #94a3b8;
+  }
+
+  .weight-value {
+    font-weight: 600;
+    color: #e2e8f0;
+  }
+
+  .weight-item input[type="range"] {
+    width: 100%;
+    height: 6px;
+    -webkit-appearance: none;
+    background: #334155;
+    border-radius: 3px;
+    outline: none;
+  }
+
+  .weight-item input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    background: #3b82f6;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .weight-item input[type="range"]::-webkit-slider-thumb:hover {
+    background: #2563eb;
+  }
+
+  .weight-total {
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: #22c55e;
+    padding-top: 4px;
+    border-top: 1px solid #334155;
+  }
+
+  .save-weight-btn {
+    padding: 10px 20px;
+    background: #3b82f6;
+    border: none;
+    border-radius: 8px;
+    color: white;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .save-weight-btn:hover:not(:disabled) {
+    background: #2563eb;
+  }
+
+  .save-weight-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .trend-icon {
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .trend-up {
+    color: #ef4444;
+  }
+
+  .trend-down {
+    color: #22c55e;
+  }
+
+  .trend-stable {
+    color: #94a3b8;
+  }
+
+  .badge-warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+  }
+
+  .text-muted {
+    color: #64748b;
   }
 
   .table-container {

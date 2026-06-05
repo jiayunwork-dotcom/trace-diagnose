@@ -995,6 +995,10 @@ pub fn health_routes() -> Router<AppState> {
         .route("/capacity", get(get_capacity_plans))
         .route("/events", get(get_health_events_handler))
         .route("/compute", post(compute_health_now))
+        .route("/weights/{service_name}", get(get_weight_config).put(update_weight_config))
+        .route("/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/webhooks/{id}", get(get_webhook).put(update_webhook).delete(delete_webhook))
+        .route("/webhooks/{id}/test", post(test_webhook))
 }
 
 async fn get_health_rankings(
@@ -1065,4 +1069,96 @@ async fn compute_health_now(
         "message": "Health computation started in background",
         "service_name": service_name
     })))
+}
+
+async fn get_weight_config(
+    State(state): State<AppState>,
+    Path(service_name): Path<String>,
+) -> Result<Json<HealthWeightConfig>, StatusCode> {
+    health::get_weight_config_for_service(&state.db, &service_name)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn update_weight_config(
+    State(state): State<AppState>,
+    Path(service_name): Path<String>,
+    Json(body): Json<HealthWeightConfigInput>,
+) -> Result<Json<HealthWeightConfig>, StatusCode> {
+    health::update_weight_config(&state.db, &service_name, &body)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn list_webhooks(
+    State(state): State<AppState>,
+) -> Json<Vec<WebhookConfig>> {
+    Json(health::list_webhooks(&state.db).await.unwrap_or_default())
+}
+
+async fn create_webhook(
+    State(state): State<AppState>,
+    Json(body): Json<WebhookConfigInput>,
+) -> Result<Json<WebhookConfig>, StatusCode> {
+    health::create_webhook(&state.db, &body)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn get_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WebhookConfig>, StatusCode> {
+    let webhook = sqlx::query_as!(
+        WebhookConfig,
+        "SELECT * FROM webhook_configs WHERE id = $1",
+        id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    
+    Ok(Json(webhook))
+}
+
+async fn update_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<WebhookConfigInput>,
+) -> Result<Json<WebhookConfig>, StatusCode> {
+    health::update_webhook(&state.db, id, &body)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::NOT_FOUND)
+}
+
+async fn delete_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    health::delete_webhook(&state.db, id).await.ok();
+    StatusCode::NO_CONTENT
+}
+
+async fn test_webhook(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    health::test_webhook(&state.db, id)
+        .await
+        .map(|(status, body)| {
+            Json(serde_json::json!({
+                "response_status": status,
+                "response_body": body,
+                "success": status >= 200 && status < 300
+            }))
+        })
+        .map_err(|e| {
+            tracing::error!("Webhook test failed: {}", e);
+            StatusCode::BAD_REQUEST
+        })
 }

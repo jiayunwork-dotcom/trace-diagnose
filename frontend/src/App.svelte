@@ -11,6 +11,7 @@
   import BatchCompare from './pages/BatchCompare.svelte'
   import Import from './pages/Import.svelte'
   import ServiceHealth from './pages/ServiceHealth.svelte'
+  import WebhookConfig from './pages/WebhookConfig.svelte'
 </script>
 
 <Router>
@@ -27,6 +28,7 @@
       <Route path="/alerts" component={AlertCenter} />
       <Route path="/import" component={Import} />
       <Route path="/service-health" component={ServiceHealth} />
+      <Route path="/webhooks" component={WebhookConfig} />
     </main>
   </div>
 </Router>

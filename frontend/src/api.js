@@ -70,4 +70,14 @@ export const getCapacityPlans = () => api.get('/health-score/capacity')
 export const getHealthEvents = (params = {}) => api.get('/health-score/events', { params })
 export const computeHealthNow = (data = {}) => api.post('/health-score/compute', data)
 
+export const getWeightConfig = (serviceName) => api.get(`/health-score/weights/${serviceName}`)
+export const updateWeightConfig = (serviceName, data) => api.put(`/health-score/weights/${serviceName}`, data)
+
+export const getWebhooks = () => api.get('/health-score/webhooks')
+export const createWebhook = (data) => api.post('/health-score/webhooks', data)
+export const getWebhook = (id) => api.get(`/health-score/webhooks/${id}`)
+export const updateWebhook = (id, data) => api.put(`/health-score/webhooks/${id}`, data)
+export const deleteWebhook = (id) => api.delete(`/health-score/webhooks/${id}`)
+export const testWebhook = (id) => api.post(`/health-score/webhooks/${id}/test`)
+
 export default api

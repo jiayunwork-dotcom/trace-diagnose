@@ -365,6 +365,9 @@ pub struct CapacityPlan {
     pub concurrent_peak_p95: i32,
     pub is_warning: bool,
     pub warning_threshold_pct: f64,
+    pub trend_direction: Option<String>,
+    pub predicted_qps_24h: Option<f64>,
+    pub hours_to_saturation: Option<i32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -419,4 +422,78 @@ pub struct HealthRankItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeHealthRequest {
     pub service_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct HealthWeightConfig {
+    pub id: Uuid,
+    pub service_name: String,
+    pub availability_weight: f64,
+    pub latency_weight: f64,
+    pub throughput_weight: f64,
+    pub error_diversity_weight: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthWeightConfigInput {
+    pub availability_weight: f64,
+    pub latency_weight: f64,
+    pub throughput_weight: f64,
+    pub error_diversity_weight: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WebhookConfig {
+    pub id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub threshold_score_drop: f64,
+    pub cooldown_minutes: i32,
+    pub is_active: bool,
+    pub last_triggered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfigInput {
+    pub name: String,
+    pub url: String,
+    pub threshold_score_drop: f64,
+    pub cooldown_minutes: i32,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WebhookDeliveryLog {
+    pub id: Uuid,
+    pub webhook_id: Uuid,
+    pub service_name: String,
+    pub current_score: f64,
+    pub previous_score: f64,
+    pub score_drop: f64,
+    pub response_status: Option<i32>,
+    pub response_body: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPayload {
+    pub service_name: String,
+    pub current_score: f64,
+    pub previous_score: f64,
+    pub score_drop: f64,
+    pub triggered_at: String,
+    pub dimension_changes: DimensionChanges,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DimensionChanges {
+    pub availability: f64,
+    pub latency: f64,
+    pub throughput_stability: f64,
+    pub error_diversity: f64,
 }
