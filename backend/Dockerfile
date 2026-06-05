@@ -8,12 +8,9 @@ ENV SQLX_OFFLINE=true
 
 COPY Cargo.toml ./
 COPY .cargo ./.cargo
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release || true
-
 COPY src ./src
-COPY .sqlx ./.sqlx
-RUN touch src/main.rs && cargo build --release
+COPY migrations ./migrations
+RUN cargo build --release
 
 FROM debian:bookworm-slim
 
