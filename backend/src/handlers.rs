@@ -1,0 +1,691 @@
+use crate::AppState;
+use crate::models::*;
+use crate::importer;
+use crate::analysis;
+use axum::{
+    extract::{Path, Query, State, Multipart},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+    routing::{get, post, put, delete},
+    Router,
+};
+use serde::Deserialize;
+use std::collections::HashMap;
+use uuid::Uuid;
+use std::time::Duration;
+
+pub fn traces_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_traces))
+        .route("/:id", get(get_trace))
+        .route("/:id/spans", get(get_trace_spans))
+        .route("/:id/critical-path", get(get_critical_path))
+        .route("/compare", get(compare_traces_handler))
+}
+
+pub fn services_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_services))
+        .route("/:name", get(get_service_details))
+        .route("/:name/metrics", get(get_service_metrics))
+        .route("/:name/latency-distribution", get(get_latency_distribution_handler))
+}
+
+pub fn topology_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(get_topology_handler))
+}
+
+pub fn analysis_routes() -> Router<AppState> {
+    Router::new()
+        .route("/latency-distribution", get(get_latency_distribution_handler))
+        .route("/anomalies", get(list_anomalies))
+        .route("/critical-path/:trace_id", get(get_critical_path))
+}
+
+pub fn slo_routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_slos))
+        .route("/", post(create_slo))
+        .route("/:id", get(get_slo))
+        .route("/:id", put(update_slo))
+        .route("/:id", delete(delete_slo))
+        .route("/:id/status", get(get_slo_status))
+}
+
+pub fn import_routes() -> Router<AppState> {
+    Router::new()
+        .route("/upload", post(upload_file))
+        .route("/push", post(push_spans))
+        .route("/jobs", get(list_import_jobs))
+        .route("/jobs/:id", get(get_import_job))
+        .route("/jobs/:id/progress", get(get_import_progress))
+}
+
+pub async fn health_check() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTracesParams {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub service: Option<String>,
+    pub min_duration: Option<i64>,
+    pub has_errors: Option<bool>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+}
+
+async fn list_traces(
+    State(state): State<AppState>,
+    Query(params): Query<ListTracesParams>,
+) -> impl IntoResponse {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(20);
+    let offset = ((page - 1) * page_size) as i64;
+
+    let mut query = "SELECT * FROM traces WHERE 1=1".to_string();
+    let mut count_query = "SELECT COUNT(*) FROM traces WHERE 1=1".to_string();
+    let mut conditions: Vec<String> = Vec::new();
+
+    if let Some(service) = &params.service {
+        conditions.push(format!("trace_id IN (SELECT DISTINCT trace_id FROM spans WHERE service_name = '{}')", service.replace("'", "''")));
+    }
+    if let Some(min_dur) = params.min_duration {
+        conditions.push(format!("duration_ms >= {}", min_dur));
+    }
+    if let Some(has_errors) = params.has_errors {
+        conditions.push(format!("has_errors = {}", has_errors));
+    }
+
+    if !conditions.is_empty() {
+        let where_clause = conditions.join(" AND ");
+        query.push_str(" AND ");
+        query.push_str(&where_clause);
+        count_query.push_str(" AND ");
+        count_query.push_str(&where_clause);
+    }
+
+    query.push_str(" ORDER BY start_time DESC LIMIT $1 OFFSET $2");
+
+    let traces: Vec<Trace> = sqlx::query_as(&query)
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let total: (i64,) = sqlx::query_as(&count_query)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or((0,));
+
+    let total_pages = (total.0 + page_size as i64 - 1) / page_size as i64;
+
+    Json(PaginatedResponse {
+        data: traces,
+        total: total.0,
+        page,
+        page_size,
+        total_pages,
+    })
+}
+
+async fn get_trace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TraceWithSpans>, StatusCode> {
+    let cache_key = format!("trace:{}", id);
+    if let Ok(Some(cached)) = state.cache.get::<TraceWithSpans>(&cache_key).await {
+        return Ok(Json(cached));
+    }
+
+    let trace = sqlx::query_as!(Trace, "SELECT * FROM traces WHERE trace_id = $1", id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let spans = sqlx::query_as!(Span, "SELECT * FROM spans WHERE trace_id = $1 ORDER BY start_time", id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let result = TraceWithSpans { trace, spans };
+
+    let _ = state.cache.set(&cache_key, &result, Duration::from_secs(300)).await;
+
+    Ok(Json(result))
+}
+
+async fn get_trace_spans(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Vec<Span>> {
+    let spans = sqlx::query_as!(Span, "SELECT * FROM spans WHERE trace_id = $1 ORDER BY start_time", id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    Json(spans)
+}
+
+#[derive(Debug, Deserialize)]
+struct CompareParams {
+    baseline: String,
+    comparison: String,
+}
+
+async fn compare_traces_handler(
+    State(state): State<AppState>,
+    Query(params): Query<CompareParams>,
+) -> Result<Json<TraceComparison>, StatusCode> {
+    analysis::compare_traces(&state.db, &params.baseline, &params.comparison)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn list_services(
+    State(state): State<AppState>,
+) -> Json<Vec<serde_json::Value>> {
+    let services = sqlx::query!(
+        r#"
+        SELECT
+            service_name,
+            COUNT(DISTINCT trace_id) as trace_count,
+            COUNT(*) as span_count,
+            AVG(duration_ms) as avg_duration,
+            COUNT(*) FILTER (WHERE status_code >= 400) as error_count
+        FROM spans
+        GROUP BY service_name
+        ORDER BY span_count DESC
+        "#
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let result: Vec<serde_json::Value> = services
+        .into_iter()
+        .map(|s| {
+            let total = s.span_count.unwrap_or(0);
+            let error_rate = if total > 0 {
+                s.error_count.unwrap_or(0) as f64 / total as f64
+            } else {
+                0.0
+            };
+            serde_json::json!({
+                "service_name": s.service_name,
+                "trace_count": s.trace_count,
+                "span_count": s.span_count,
+                "avg_duration_ms": s.avg_duration.unwrap_or(0.0),
+                "error_rate": error_rate,
+            })
+        })
+        .collect();
+
+    Json(result)
+}
+
+async fn get_service_details(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let details = sqlx::query!(
+        r#"
+        SELECT
+            COUNT(DISTINCT trace_id) as trace_count,
+            COUNT(*) as span_count,
+            AVG(duration_ms) as avg_duration,
+            MIN(duration_ms) as min_duration,
+            MAX(duration_ms) as max_duration,
+            COUNT(*) FILTER (WHERE status_code >= 400) as error_count
+        FROM spans
+        WHERE service_name = $1
+        "#,
+        name
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let operations = sqlx::query!(
+        r#"
+        SELECT
+            operation_name,
+            COUNT(*) as call_count,
+            AVG(duration_ms) as avg_duration,
+            COUNT(*) FILTER (WHERE status_code >= 400) as error_count
+        FROM spans
+        WHERE service_name = $1
+        GROUP BY operation_name
+        ORDER BY call_count DESC
+        LIMIT 20
+        "#,
+        name
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let total = details.span_count.unwrap_or(0);
+    let error_rate = if total > 0 {
+        details.error_count.unwrap_or(0) as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    Ok(Json(serde_json::json!({
+        "service_name": name,
+        "trace_count": details.trace_count,
+        "span_count": details.span_count,
+        "avg_duration_ms": details.avg_duration.unwrap_or(0.0),
+        "min_duration_ms": details.min_duration,
+        "max_duration_ms": details.max_duration,
+        "error_rate": error_rate,
+        "operations": operations.into_iter().map(|op| {
+            let total_ops = op.call_count.unwrap_or(0);
+            let op_error_rate = if total_ops > 0 {
+                op.error_count.unwrap_or(0) as f64 / total_ops as f64
+            } else { 0.0 };
+            serde_json::json!({
+                "operation_name": op.operation_name,
+                "call_count": op.call_count,
+                "avg_duration_ms": op.avg_duration.unwrap_or(0.0),
+                "error_rate": op_error_rate,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceMetricsParams {
+    pub operation: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+}
+
+async fn get_service_metrics(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<ServiceMetricsParams>,
+) -> Json<Vec<ServiceMetric>> {
+    let mut query = "SELECT * FROM service_metrics WHERE service_name = $1".to_string();
+    let mut q = sqlx::query_as::<_, ServiceMetric>(&query).bind(name);
+
+    if let Some(op) = &params.operation {
+        query.push_str(" AND operation_name = $2");
+        q = sqlx::query_as::<_, ServiceMetric>(&query).bind(name).bind(op);
+    }
+
+    query.push_str(" ORDER BY time_bucket DESC LIMIT 100");
+
+    let metrics = q.fetch_all(&state.db).await.unwrap_or_default();
+    Json(metrics)
+}
+
+#[derive(Debug, Deserialize)]
+struct LatencyDistributionParams {
+    pub service: Option<String>,
+    pub operation: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+}
+
+async fn get_latency_distribution_handler(
+    State(state): State<AppState>,
+    Query(params): Query<LatencyDistributionParams>,
+) -> Json<LatencyDistribution> {
+    let dist = analysis::get_latency_distribution(
+        &state.db,
+        params.service.as_deref(),
+        params.operation.as_deref(),
+        None,
+        None,
+    )
+    .await
+    .unwrap_or(LatencyDistribution {
+        buckets: vec![],
+        p50: 0.0,
+        p95: 0.0,
+        p99: 0.0,
+    });
+    Json(dist)
+}
+
+async fn get_topology_handler(
+    State(state): State<AppState>,
+) -> Json<TopologyResponse> {
+    let cache_key = "topology:full";
+    if let Ok(Some(cached)) = state.cache.get::<TopologyResponse>(cache_key).await {
+        return Json(cached);
+    }
+
+    let topology = analysis::get_topology(&state.db)
+        .await
+        .unwrap_or(TopologyResponse {
+            nodes: vec![],
+            edges: vec![],
+        });
+
+    let _ = state.cache.set(cache_key, &topology, Duration::from_secs(60)).await;
+
+    Json(topology)
+}
+
+async fn list_anomalies(
+    State(state): State<AppState>,
+    Query(params): Query<ListTracesParams>,
+) -> Json<Vec<AnomalyTrace>> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(20);
+    let offset = ((page - 1) * page_size) as i64;
+
+    let anomalies = sqlx::query_as!(
+        AnomalyTrace,
+        "SELECT * FROM anomaly_traces ORDER BY detected_at DESC LIMIT $1 OFFSET $2",
+        page_size as i64,
+        offset
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(anomalies)
+}
+
+async fn get_critical_path(
+    State(state): State<AppState>,
+    Path(trace_id): Path<String>,
+) -> Result<Json<CriticalPath>, StatusCode> {
+    analysis::find_critical_path(&state.db, &trace_id)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn list_slos(
+    State(state): State<AppState>,
+) -> Json<Vec<SloConfig>> {
+    let slos = sqlx::query_as!(SloConfig, "SELECT * FROM slo_configs WHERE is_active = TRUE ORDER BY service_name")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    Json(slos)
+}
+
+async fn create_slo(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<StatusCode, StatusCode> {
+    let service_name = body["service_name"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    let slo_type = body["slo_type"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    let threshold = body["threshold"].as_f64().ok_or(StatusCode::BAD_REQUEST)?;
+    let target = body["target"].as_f64().ok_or(StatusCode::BAD_REQUEST)?;
+    let window_days = body["window_days"].as_i64().unwrap_or(30) as i32;
+    let description = body["description"].as_str().map(|s| s.to_string());
+
+    sqlx::query!(
+        r#"
+        INSERT INTO slo_configs (service_name, slo_type, threshold, target, window_days, description)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+        service_name,
+        slo_type,
+        threshold,
+        target,
+        window_days,
+        description
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::CREATED)
+}
+
+async fn get_slo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SloConfig>, StatusCode> {
+    let slo = sqlx::query_as!(SloConfig, "SELECT * FROM slo_configs WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(slo))
+}
+
+async fn update_slo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> StatusCode {
+    let threshold = body["threshold"].as_f64();
+    let target = body["target"].as_f64();
+    let is_active = body["is_active"].as_bool();
+
+    if threshold.is_some() || target.is_some() || is_active.is_some() {
+        sqlx::query!(
+            r#"
+            UPDATE slo_configs SET
+                threshold = COALESCE($1, threshold),
+                target = COALESCE($2, target),
+                is_active = COALESCE($3, is_active),
+                updated_at = NOW()
+            WHERE id = $4
+            "#,
+            threshold,
+            target,
+            is_active,
+            id
+        )
+        .execute(&state.db)
+        .await
+        .ok();
+    }
+
+    StatusCode::NO_CONTENT
+}
+
+async fn delete_slo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    sqlx::query!("DELETE FROM slo_configs WHERE id = $1", id)
+        .execute(&state.db)
+        .await
+        .ok();
+    StatusCode::NO_CONTENT
+}
+
+async fn get_slo_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Json<Vec<SloStatus>> {
+    let _ = analysis::calculate_slo_status(&state.db, id).await;
+    let status = sqlx::query_as!(
+        SloStatus,
+        "SELECT * FROM slo_status WHERE slo_id = $1 ORDER BY date DESC LIMIT 30",
+        id
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    Json(status)
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let job_id = Uuid::new_v4();
+    let mut format = "otel".to_string();
+    let mut file_name = None;
+    let mut file_data = Vec::new();
+
+    while let Some(field) = multipart.next_field().await.map_err(|_| StatusCode::BAD_REQUEST)? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "format" {
+            format = field.text().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+        } else if name == "file" {
+            file_name = field.file_name().map(|s| s.to_string());
+            file_data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?.to_vec();
+        }
+    }
+
+    let trace_format = importer::TraceFormat::from_str(&format).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO import_jobs (id, file_name, format, status, started_at)
+        VALUES ($1, $2, $3, 'processing', NOW())
+        "#,
+        job_id,
+        file_name,
+        format
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let db = state.db.clone();
+    let progress_map = state.import_progress.clone();
+
+    tokio::spawn(async move {
+        let progress_callback = |total: usize, processed: usize| -> anyhow::Result<()> {
+            let mut map = progress_map.blocking_write();
+            map.insert(job_id.to_string(), importer::ImportProgress {
+                job_id,
+                total,
+                processed,
+                status: "processing".to_string(),
+            });
+            Ok(())
+        };
+
+        let result = importer::parse_and_import(&db, trace_format, &file_data, job_id, progress_callback).await;
+
+        match result {
+            Ok(count) => {
+                sqlx::query!(
+                    r#"
+                    UPDATE import_jobs
+                    SET status = 'completed', total_spans = $1, processed_spans = $2, completed_at = NOW()
+                    WHERE id = $3
+                    "#,
+                    count as i32,
+                    count as i32,
+                    job_id
+                )
+                .execute(&db)
+                .await
+                .ok();
+            }
+            Err(e) => {
+                sqlx::query!(
+                    r#"
+                    UPDATE import_jobs
+                    SET status = 'failed', error_message = $1, completed_at = NOW()
+                    WHERE id = $2
+                    "#,
+                    e.to_string(),
+                    job_id
+                )
+                .execute(&db)
+                .await
+                .ok();
+            }
+        }
+
+        progress_map.write().await.remove(&job_id.to_string());
+    });
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "status": "processing"
+    })))
+}
+
+async fn push_spans(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+    body: String,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let format = params.get("format").cloned().unwrap_or_else(|| "otel".to_string());
+    let trace_format = importer::TraceFormat::from_str(&format).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let job_id = Uuid::new_v4();
+    let data = body.as_bytes();
+
+    let result = importer::parse_and_import(
+        &state.db,
+        trace_format,
+        data,
+        job_id,
+        |_, _| Ok(()),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Import failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "imported_spans": result,
+        "status": "success"
+    })))
+}
+
+async fn list_import_jobs(
+    State(state): State<AppState>,
+) -> Json<Vec<ImportJob>> {
+    let jobs = sqlx::query_as!(ImportJob, "SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT 50")
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+    Json(jobs)
+}
+
+async fn get_import_job(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ImportJob>, StatusCode> {
+    let job = sqlx::query_as!(ImportJob, "SELECT * FROM import_jobs WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(job))
+}
+
+async fn get_import_progress(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Json<serde_json::Value> {
+    let map = state.import_progress.read().await;
+    if let Some(progress) = map.get(&id.to_string()) {
+        return Json(serde_json::json!(progress));
+    }
+
+    let job = sqlx::query_as!(ImportJob, "SELECT * FROM import_jobs WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(job) = job {
+        Json(serde_json::json!({
+            "job_id": job.id,
+            "total": job.total_spans,
+            "processed": job.processed_spans,
+            "status": job.status
+        }))
+    } else {
+        Json(serde_json::json!({
+            "status": "not_found"
+        }))
+    }
+}
