@@ -26,9 +26,9 @@
     }
   })
 
-  const totalSpans = services.reduce((sum, s) => sum + (s.span_count || 0), 0)
-  const totalErrors = services.reduce((sum, s) => sum + (s.error_rate || 0) * (s.span_count || 0), 0)
-  const avgErrorRate = services.length > 0 ? (totalErrors / totalSpans * 100).toFixed(2) : '0'
+  $: totalSpans = services.reduce((sum, s) => sum + (s.span_count || 0), 0)
+  $: totalErrors = services.reduce((sum, s) => sum + (s.error_rate || 0) * (s.span_count || 0), 0)
+  $: avgErrorRate = services.length > 0 ? (totalErrors / (totalSpans || 1) * 100).toFixed(2) : '0'
 </script>
 
 <div class="dashboard">

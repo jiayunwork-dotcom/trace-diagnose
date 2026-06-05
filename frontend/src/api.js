@@ -39,6 +39,7 @@ export const uploadTraceFile = (file, format = 'otel') => {
   formData.append('format', format)
   return api.post('/import/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 600000,
   })
 }
 

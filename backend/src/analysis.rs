@@ -311,34 +311,40 @@ pub async fn get_latency_distribution(
     start_time: Option<DateTime<Utc>>,
     end_time: Option<DateTime<Utc>>,
 ) -> Result<LatencyDistribution> {
-    let mut query = "SELECT duration_ms FROM spans WHERE 1=1".to_string();
-    let mut params: Vec<String> = Vec::new();
+    let spans = match (service_name, operation_name) {
+        (Some(svc), Some(op)) => {
+            sqlx::query!(
+                "SELECT duration_ms FROM spans WHERE service_name = $1 AND operation_name = $2",
+                svc, op
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        (Some(svc), None) => {
+            sqlx::query!(
+                "SELECT duration_ms FROM spans WHERE service_name = $1",
+                svc
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        (None, Some(op)) => {
+            sqlx::query!(
+                "SELECT duration_ms FROM spans WHERE operation_name = $1",
+                op
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        (None, None) => {
+            sqlx::query!("SELECT duration_ms FROM spans")
+                .fetch_all(pool)
+                .await?
+        }
+    };
 
-    if let Some(svc) = service_name {
-        params.push(svc.to_string());
-        query.push_str(&format!(" AND service_name = ${}", params.len()));
-    }
-    if let Some(op) = operation_name {
-        params.push(op.to_string());
-        query.push_str(&format!(" AND operation_name = ${}", params.len()));
-    }
-    if let Some(start) = start_time {
-        params.push(start.to_rfc3339());
-        query.push_str(&format!(" AND start_time >= ${}", params.len()));
-    }
-    if let Some(end) = end_time {
-        params.push(end.to_rfc3339());
-        query.push_str(&format!(" AND start_time <= ${}", params.len()));
-    }
-
-    let mut q = sqlx::query(&query);
-    for p in &params {
-        q = q.bind(p);
-    }
-    let rows = q.fetch_all(pool).await?;
-
-    let mut durations: Vec<i64> = rows.iter()
-        .map(|r| r.try_get("duration_ms").unwrap_or(0))
+    let mut durations: Vec<i64> = spans.iter()
+        .map(|r| r.duration_ms.unwrap_or(0))
         .collect();
     durations.sort();
 

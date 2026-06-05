@@ -71,7 +71,7 @@
     }
   }
 
-  const totalPages = Math.ceil(total / pageSize)
+  $: totalPages = Math.max(1, Math.ceil(total / pageSize))
 </script>
 
 <div class="traces-page">

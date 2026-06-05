@@ -114,16 +114,17 @@ async fn list_traces(
         .await
         .unwrap_or_default();
 
-    let total: (i64,) = sqlx::query_as(&count_query)
+    let total: Option<i64> = sqlx::query_scalar(&count_query)
         .fetch_one(&state.db)
         .await
-        .unwrap_or((0,));
+        .ok();
+    let total = total.unwrap_or(0);
 
-    let total_pages = (total.0 + page_size as i64 - 1) / page_size as i64;
+    let total_pages = (total + page_size as i64 - 1) / page_size as i64;
 
     Json(PaginatedResponse {
         data: traces,
-        total: total.0,
+        total,
         page,
         page_size,
         total_pages,
@@ -309,17 +310,24 @@ async fn get_service_metrics(
     Path(name): Path<String>,
     Query(params): Query<ServiceMetricsParams>,
 ) -> Json<Vec<ServiceMetric>> {
-    let mut query = "SELECT * FROM service_metrics WHERE service_name = $1".to_string();
-    let mut q = sqlx::query_as::<_, ServiceMetric>(&query).bind(name);
-
-    if let Some(op) = &params.operation {
-        query.push_str(" AND operation_name = $2");
-        q = sqlx::query_as::<_, ServiceMetric>(&query).bind(name).bind(op);
-    }
-
-    query.push_str(" ORDER BY time_bucket DESC LIMIT 100");
-
-    let metrics = q.fetch_all(&state.db).await.unwrap_or_default();
+    let metrics = if let Some(op) = &params.operation {
+        sqlx::query_as::<_, ServiceMetric>(
+            "SELECT * FROM service_metrics WHERE service_name = $1 AND operation_name = $2 ORDER BY time_bucket DESC LIMIT 100"
+        )
+        .bind(&name)
+        .bind(op)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, ServiceMetric>(
+            "SELECT * FROM service_metrics WHERE service_name = $1 ORDER BY time_bucket DESC LIMIT 100"
+        )
+        .bind(&name)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+    };
     Json(metrics)
 }
 
@@ -552,13 +560,18 @@ async fn upload_file(
     let progress_map = state.import_progress.clone();
 
     tokio::spawn(async move {
-        let progress_callback = |total: usize, processed: usize| -> anyhow::Result<()> {
-            let mut map = progress_map.blocking_write();
-            map.insert(job_id.to_string(), importer::ImportProgress {
+        let progress_map_clone = progress_map.clone();
+        let progress_callback = move |total: usize, processed: usize| -> anyhow::Result<()> {
+            let progress = importer::ImportProgress {
                 job_id,
                 total,
                 processed,
                 status: "processing".to_string(),
+            };
+            let map = progress_map_clone.clone();
+            tokio::spawn(async move {
+                let mut w = map.write().await;
+                w.insert(job_id.to_string(), progress);
             });
             Ok(())
         };
