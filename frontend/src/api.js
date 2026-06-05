@@ -50,4 +50,17 @@ export const getImportJobs = () => api.get('/import/jobs')
 export const getImportJob = (id) => api.get(`/import/jobs/${id}`)
 export const getImportProgress = (id) => api.get(`/import/jobs/${id}/progress`)
 
+export const getAlertRules = () => api.get('/alerts/rules')
+export const createAlertRule = (data) => api.post('/alerts/rules', data)
+export const getAlertRule = (id) => api.get(`/alerts/rules/${id}`)
+export const updateAlertRule = (id, data) => api.put(`/alerts/rules/${id}`, data)
+export const deleteAlertRule = (id) => api.delete(`/alerts/rules/${id}`)
+export const getRuleEvents = (id, params = {}) => api.get(`/alerts/rules/${id}/events`, { params })
+
+export const getAlertEvents = (params = {}) => api.get('/alerts/events', { params })
+export const acknowledgeAlert = (id, data = {}) => api.post(`/alerts/events/${id}/acknowledge`, data)
+export const evaluateAlerts = () => api.post('/alerts/evaluate')
+
+export const batchCompare = (params) => api.get('/analysis/batch-compare', { params })
+
 export default api

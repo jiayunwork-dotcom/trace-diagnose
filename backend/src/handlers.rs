@@ -42,6 +42,7 @@ pub fn analysis_routes() -> Router<AppState> {
         .route("/latency-distribution", get(get_latency_distribution_handler))
         .route("/anomalies", get(list_anomalies))
         .route("/critical-path/{trace_id}", get(get_critical_path))
+        .route("/batch-compare", get(batch_compare_handler))
 }
 
 pub fn slo_routes() -> Router<AppState> {
@@ -49,6 +50,16 @@ pub fn slo_routes() -> Router<AppState> {
         .route("/", get(list_slos).post(create_slo))
         .route("/{id}", get(get_slo).put(update_slo).delete(delete_slo))
         .route("/{id}/status", get(get_slo_status))
+}
+
+pub fn alerts_routes() -> Router<AppState> {
+    Router::new()
+        .route("/rules", get(list_alert_rules).post(create_alert_rule))
+        .route("/rules/{id}", get(get_alert_rule).put(update_alert_rule).delete(delete_alert_rule))
+        .route("/rules/{id}/events", get(get_rule_events))
+        .route("/events", get(list_alert_events))
+        .route("/events/{id}/acknowledge", post(acknowledge_alert_event))
+        .route("/evaluate", post(evaluate_alerts))
 }
 
 pub fn import_routes() -> Router<AppState> {
@@ -698,4 +709,280 @@ async fn get_import_progress(
             "status": "not_found"
         }))
     }
+}
+
+async fn list_alert_rules(
+    State(state): State<AppState>,
+) -> Json<Vec<AlertRule>> {
+    let rules = sqlx::query_as!(
+        AlertRule,
+        "SELECT * FROM alert_rules ORDER BY created_at DESC"
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    Json(rules)
+}
+
+async fn create_alert_rule(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<StatusCode, StatusCode> {
+    let name = body["name"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    let description = body["description"].as_str().map(|s| s.to_string());
+    let service_name = body["service_name"].as_str().map(|s| s.to_string());
+    let operation_name = body["operation_name"].as_str().map(|s| s.to_string());
+    let metric_type = body["metric_type"].as_str().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+    let threshold = body["threshold"].as_f64().ok_or(StatusCode::BAD_REQUEST)?;
+    let comparison_operator = body["comparison_operator"].as_str().unwrap_or(">").to_string();
+    let window_minutes = body["window_minutes"].as_i64().unwrap_or(5) as i32;
+    let consecutive_windows = body["consecutive_windows"].as_i64().unwrap_or(1) as i32;
+    let severity = body["severity"].as_str().unwrap_or("warning").to_string();
+    let silence_minutes = body["silence_minutes"].as_i64().unwrap_or(30) as i32;
+
+    sqlx::query!(
+        r#"
+        INSERT INTO alert_rules (
+            name, description, service_name, operation_name,
+            metric_type, threshold, comparison_operator,
+            window_minutes, consecutive_windows, severity, silence_minutes
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+        name,
+        description,
+        service_name,
+        operation_name,
+        metric_type,
+        threshold,
+        comparison_operator,
+        window_minutes,
+        consecutive_windows,
+        severity,
+        silence_minutes,
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::CREATED)
+}
+
+async fn get_alert_rule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AlertRule>, StatusCode> {
+    let rule = sqlx::query_as!(AlertRule, "SELECT * FROM alert_rules WHERE id = $1", id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(rule))
+}
+
+async fn update_alert_rule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> StatusCode {
+    let name = body["name"].as_str().map(|s| s.to_string());
+    let description = body["description"].as_str().map(|s| s.to_string());
+    let threshold = body["threshold"].as_f64();
+    let comparison_operator = body["comparison_operator"].as_str().map(|s| s.to_string());
+    let window_minutes = body["window_minutes"].as_i64().map(|v| v as i32);
+    let consecutive_windows = body["consecutive_windows"].as_i64().map(|v| v as i32);
+    let severity = body["severity"].as_str().map(|s| s.to_string());
+    let silence_minutes = body["silence_minutes"].as_i64().map(|v| v as i32);
+    let is_active = body["is_active"].as_bool();
+
+    sqlx::query!(
+        r#"
+        UPDATE alert_rules SET
+            name = COALESCE($1, name),
+            description = COALESCE($2, description),
+            threshold = COALESCE($3, threshold),
+            comparison_operator = COALESCE($4, comparison_operator),
+            window_minutes = COALESCE($5, window_minutes),
+            consecutive_windows = COALESCE($6, consecutive_windows),
+            severity = COALESCE($7, severity),
+            silence_minutes = COALESCE($8, silence_minutes),
+            is_active = COALESCE($9, is_active),
+            updated_at = NOW()
+        WHERE id = $10
+        "#,
+        name,
+        description,
+        threshold,
+        comparison_operator,
+        window_minutes,
+        consecutive_windows,
+        severity,
+        silence_minutes,
+        is_active,
+        id
+    )
+    .execute(&state.db)
+    .await
+    .ok();
+
+    StatusCode::NO_CONTENT
+}
+
+async fn delete_alert_rule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> StatusCode {
+    sqlx::query!("DELETE FROM alert_rules WHERE id = $1", id)
+        .execute(&state.db)
+        .await
+        .ok();
+    StatusCode::NO_CONTENT
+}
+
+async fn get_rule_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(params): Query<ListTracesParams>,
+) -> Json<Vec<AlertEvent>> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(20);
+    let offset = ((page - 1) * page_size) as i64;
+
+    let events = sqlx::query_as!(
+        AlertEvent,
+        "SELECT * FROM alert_events WHERE rule_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        id,
+        page_size as i64,
+        offset
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Json(events)
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAlertEventsParams {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub status: Option<String>,
+    pub service: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+}
+
+async fn list_alert_events(
+    State(state): State<AppState>,
+    Query(params): Query<ListAlertEventsParams>,
+) -> Json<PaginatedResponse<AlertEvent>> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(20);
+    let offset = ((page - 1) * page_size) as i64;
+
+    let mut query = "SELECT * FROM alert_events WHERE 1=1".to_string();
+    let mut count_query = "SELECT COUNT(*) FROM alert_events WHERE 1=1".to_string();
+    let mut conditions: Vec<String> = Vec::new();
+
+    if let Some(status) = &params.status {
+        conditions.push(format!("status = '{}'", status.replace("'", "''")));
+    }
+    if let Some(service) = &params.service {
+        conditions.push(format!("service_name = '{}'", service.replace("'", "''")));
+    }
+
+    if !conditions.is_empty() {
+        let where_clause = conditions.join(" AND ");
+        query.push_str(" AND ");
+        query.push_str(&where_clause);
+        count_query.push_str(" AND ");
+        count_query.push_str(&where_clause);
+    }
+
+    let sort_by = params.sort_by.as_deref().unwrap_or("created_at");
+    let sort_order = params.sort_order.as_deref().unwrap_or("DESC");
+    query.push_str(&format!(" ORDER BY {} {} LIMIT $1 OFFSET $2", sort_by, sort_order));
+
+    let events: Vec<AlertEvent> = sqlx::query_as(&query)
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let total: Option<i64> = sqlx::query_scalar(&count_query)
+        .fetch_one(&state.db)
+        .await
+        .ok();
+    let total = total.unwrap_or(0);
+
+    let total_pages = (total + page_size as i64 - 1) / page_size as i64;
+
+    Json(PaginatedResponse {
+        data: events,
+        total,
+        page,
+        page_size,
+        total_pages,
+    })
+}
+
+async fn acknowledge_alert_event(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> StatusCode {
+    let acknowledged_by = body["acknowledged_by"].as_str().unwrap_or("system").to_string();
+
+    sqlx::query!(
+        r#"
+        UPDATE alert_events
+        SET status = 'acknowledged', acknowledged_by = $1, acknowledged_at = NOW()
+        WHERE id = $2
+        "#,
+        acknowledged_by,
+        id
+    )
+    .execute(&state.db)
+    .await
+    .ok();
+
+    StatusCode::NO_CONTENT
+}
+
+async fn evaluate_alerts(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<AlertEvent>>, StatusCode> {
+    analysis::evaluate_alert_rules(&state.db)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchCompareParams {
+    pub baseline_start: String,
+    pub baseline_end: String,
+    pub comparison_start: String,
+    pub comparison_end: String,
+}
+
+pub async fn batch_compare_handler(
+    State(state): State<AppState>,
+    Query(params): Query<BatchCompareParams>,
+) -> Result<Json<Vec<BatchComparisonResult>>, StatusCode> {
+    let parse_dt = |s: &str| -> DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now())
+    };
+
+    let baseline_start = parse_dt(&params.baseline_start);
+    let baseline_end = parse_dt(&params.baseline_end);
+    let comparison_start = parse_dt(&params.comparison_start);
+    let comparison_end = parse_dt(&params.comparison_end);
+
+    analysis::batch_compare_traces(&state.db, baseline_start, baseline_end, comparison_start, comparison_end)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

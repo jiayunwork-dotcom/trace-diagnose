@@ -7,6 +7,8 @@
   import TraceDetail from './pages/TraceDetail.svelte'
   import Analysis from './pages/Analysis.svelte'
   import SLO from './pages/SLO.svelte'
+  import AlertRules from './pages/AlertRules.svelte'
+  import AlertEvents from './pages/AlertEvents.svelte'
   import Import from './pages/Import.svelte'
 </script>
 
@@ -20,6 +22,8 @@
       <Route path="/traces/:id" component={TraceDetail} />
       <Route path="/analysis" component={Analysis} />
       <Route path="/slo" component={SLO} />
+      <Route path="/alerts/rules" component={AlertRules} />
+      <Route path="/alerts/events" component={AlertEvents} />
       <Route path="/import" component={Import} />
     </main>
   </div>

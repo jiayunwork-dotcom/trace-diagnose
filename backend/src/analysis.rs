@@ -404,7 +404,22 @@ pub async fn detect_anomalies_in_trace(pool: &DbPool, trace_id: &str) -> Result<
         }
     }
 
+    let children_map: HashMap<&str, Vec<&Span>> = spans
+        .iter()
+        .fold(HashMap::new(), |mut map, span| {
+            if let Some(parent_id) = &span.parent_span_id {
+                map.entry(parent_id.as_str()).or_default().push(span);
+            }
+            map
+        });
+
+    let is_span_anomalous = |span: &Span| -> bool {
+        span.duration_ms > threshold_ms || span.status_code >= 400
+    };
+
     for (span, reason) in &anomaly_spans {
+        let root_cause = find_root_cause(span, &children_map, &is_span_anomalous);
+
         let severity = if span.duration_ms > threshold_ms * 3 || span.status_code >= 500 {
             "critical"
         } else if span.duration_ms > threshold_ms * 2 || span.status_code >= 400 {
@@ -425,16 +440,43 @@ pub async fn detect_anomalies_in_trace(pool: &DbPool, trace_id: &str) -> Result<
             trace_id,
             if span.status_code >= 400 { "error" } else { "latency" },
             severity,
-            Some(span.service_name.clone()),
-            Some(span.operation_name.clone()),
+            Some(root_cause.service_name.clone()),
+            Some(root_cause.operation_name.clone()),
             &affected.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            json!({ "reason": reason, "span_id": span.span_id, "duration_ms": span.duration_ms, "status_code": span.status_code }),
+            json!({
+                "reason": reason,
+                "span_id": span.span_id,
+                "duration_ms": span.duration_ms,
+                "status_code": span.status_code,
+                "root_cause_span_id": root_cause.span_id
+            }),
         )
         .execute(pool)
         .await?;
     }
 
     Ok(())
+}
+
+fn find_root_cause<'a, F>(
+    start_span: &'a Span,
+    children_map: &HashMap<&str, Vec<&'a Span>>,
+    is_anomalous: F,
+) -> &'a Span
+where
+    F: Fn(&Span) -> bool,
+{
+    let mut current = start_span;
+    loop {
+        let children = children_map.get(current.span_id.as_str()).unwrap_or(&vec![]);
+        let anomalous_children: Vec<_> = children.iter().filter(|c| is_anomalous(c)).collect();
+
+        if anomalous_children.is_empty() {
+            return current;
+        }
+
+        current = anomalous_children.iter().max_by_key(|c| c.duration_ms).unwrap();
+    }
 }
 
 fn trace_affected_services(spans: &[Span], start_span: &Span) -> Vec<String> {
@@ -669,4 +711,301 @@ pub async fn calculate_slo_status(pool: &DbPool, slo_id: uuid::Uuid) -> Result<(
     .await?;
 
     Ok(())
+}
+
+pub async fn evaluate_alert_rules(pool: &DbPool) -> Result<Vec<AlertEvent>> {
+    let rules = sqlx::query_as!(
+        AlertRule,
+        "SELECT * FROM alert_rules WHERE is_active = TRUE"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut new_events = Vec::new();
+
+    for rule in rules {
+        if let Some(last_triggered) = rule.last_triggered_at {
+            let silence_until = last_triggered + Duration::minutes(rule.silence_minutes as i64);
+            if Utc::now() < silence_until {
+                continue;
+            }
+        }
+
+        let should_trigger = evaluate_rule_condition(pool, &rule).await?;
+
+        if should_trigger {
+            let event = create_alert_event(pool, &rule).await?;
+            new_events.push(event);
+
+            sqlx::query!(
+                "UPDATE alert_rules SET last_triggered_at = NOW(), updated_at = NOW() WHERE id = $1",
+                rule.id
+            )
+            .execute(pool)
+            .await?;
+        } else {
+            resolve_recovered_alerts(pool, &rule).await?;
+        }
+    }
+
+    Ok(new_events)
+}
+
+async fn evaluate_rule_condition(pool: &DbPool, rule: &AlertRule) -> Result<bool> {
+    let window_duration = Duration::minutes(rule.window_minutes as i64);
+    let now = Utc::now();
+    let mut consecutive_count = 0;
+
+    for i in 0..rule.consecutive_windows {
+        let window_end = now - Duration::minutes((i * rule.window_minutes) as i64);
+        let window_start = window_end - window_duration;
+
+        let metric_value = calculate_metric_value(
+            pool,
+            &rule.metric_type,
+            rule.service_name.as_deref(),
+            rule.operation_name.as_deref(),
+            window_start,
+            window_end,
+        ).await?;
+
+        let threshold_met = match rule.comparison_operator.as_str() {
+            ">" => metric_value > rule.threshold,
+            ">=" => metric_value >= rule.threshold,
+            "<" => metric_value < rule.threshold,
+            "<=" => metric_value <= rule.threshold,
+            "==" => (metric_value - rule.threshold).abs() < f64::EPSILON,
+            _ => metric_value > rule.threshold,
+        };
+
+        if threshold_met {
+            consecutive_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    Ok(consecutive_count >= rule.consecutive_windows)
+}
+
+async fn calculate_metric_value(
+    pool: &DbPool,
+    metric_type: &str,
+    service_name: Option<&str>,
+    operation_name: Option<&str>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+) -> Result<f64> {
+    let mut sql = String::new();
+
+    match metric_type {
+        "latency_p95" => {
+            sql = "SELECT AVG(p95_ms) as value FROM service_metrics WHERE time_bucket >= $1 AND time_bucket < $2".to_string();
+        }
+        "latency_p50" => {
+            sql = "SELECT AVG(p50_ms) as value FROM service_metrics WHERE time_bucket >= $1 AND time_bucket < $2".to_string();
+        }
+        "error_rate" => {
+            sql = "SELECT CASE WHEN SUM(call_count) > 0 THEN SUM(error_count)::FLOAT / SUM(call_count) * 100 ELSE 0 END as value FROM service_metrics WHERE time_bucket >= $1 AND time_bucket < $2".to_string();
+        }
+        "qps" => {
+            sql = "SELECT SUM(call_count)::FLOAT / EXTRACT(EPOCH FROM ($2::TIMESTAMPTZ - $1::TIMESTAMPTZ)) as value FROM service_metrics WHERE time_bucket >= $1 AND time_bucket < $2".to_string();
+        }
+        _ => {
+            return Ok(0.0);
+        }
+    }
+
+    if service_name.is_some() {
+        sql.push_str(" AND service_name = $3");
+    }
+    if operation_name.is_some() {
+        let param_index = if service_name.is_some() { 4 } else { 3 };
+        sql.push_str(&format!(" AND operation_name = ${}", param_index));
+    }
+
+    let value: Option<f64> = if service_name.is_some() && operation_name.is_some() {
+        sqlx::query_scalar(&sql)
+            .bind(start_time)
+            .bind(end_time)
+            .bind(service_name.unwrap())
+            .bind(operation_name.unwrap())
+            .fetch_one(pool)
+            .await?
+    } else if service_name.is_some() {
+        sqlx::query_scalar(&sql)
+            .bind(start_time)
+            .bind(end_time)
+            .bind(service_name.unwrap())
+            .fetch_one(pool)
+            .await?
+    } else {
+        sqlx::query_scalar(&sql)
+            .bind(start_time)
+            .bind(end_time)
+            .fetch_one(pool)
+            .await?
+    };
+
+    Ok(value.unwrap_or(0.0))
+}
+
+async fn create_alert_event(pool: &DbPool, rule: &AlertRule) -> Result<AlertEvent> {
+    let window_duration = Duration::minutes(rule.window_minutes as i64);
+    let now = Utc::now();
+    let window_start = now - window_duration;
+
+    let metric_value = calculate_metric_value(
+        pool,
+        &rule.metric_type,
+        rule.service_name.as_deref(),
+        rule.operation_name.as_deref(),
+        window_start,
+        now,
+    ).await?;
+
+    let trace_ids = if let Some(svc_name) = &rule.service_name {
+        let traces = sqlx::query!(
+            r#"
+            SELECT DISTINCT t.trace_id
+            FROM traces t
+            JOIN spans s ON t.trace_id = s.trace_id
+            WHERE s.service_name = $1
+              AND t.start_time >= $2
+              AND (t.has_errors = TRUE OR t.duration_ms > 3000)
+            ORDER BY t.start_time DESC
+            LIMIT 10
+            "#,
+            svc_name,
+            window_start
+        )
+        .fetch_all(pool)
+        .await?;
+        traces.iter().map(|t| t.trace_id.clone()).collect()
+    } else {
+        vec![]
+    };
+
+    let event = sqlx::query_as!(
+        AlertEvent,
+        r#"
+        INSERT INTO alert_events (
+            rule_id, rule_name, service_name, operation_name,
+            metric_type, metric_value, threshold, status, trace_ids
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'firing', $8)
+        RETURNING *
+        "#,
+        rule.id,
+        rule.name,
+        rule.service_name,
+        rule.operation_name,
+        rule.metric_type,
+        metric_value,
+        rule.threshold,
+        &trace_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(event)
+}
+
+async fn resolve_recovered_alerts(pool: &DbPool, rule: &AlertRule) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE alert_events
+        SET status = 'resolved', resolved_at = NOW()
+        WHERE rule_id = $1 AND status = 'firing'
+        "#,
+        rule.id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn batch_compare_traces(
+    pool: &DbPool,
+    baseline_start: DateTime<Utc>,
+    baseline_end: DateTime<Utc>,
+    comparison_start: DateTime<Utc>,
+    comparison_end: DateTime<Utc>,
+) -> Result<Vec<BatchComparisonResult>> {
+    let baseline_metrics = sqlx::query!(
+        r#"
+        SELECT
+            service_name,
+            operation_name,
+            AVG(total_duration_ms::FLOAT / NULLIF(call_count, 0)) as avg_duration,
+            AVG(p95_ms) as p95,
+            SUM(call_count) as call_count
+        FROM service_metrics
+        WHERE time_bucket >= $1 AND time_bucket < $2
+        GROUP BY service_name, operation_name
+        "#,
+        baseline_start,
+        baseline_end
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let comparison_metrics = sqlx::query!(
+        r#"
+        SELECT
+            service_name,
+            operation_name,
+            AVG(total_duration_ms::FLOAT / NULLIF(call_count, 0)) as avg_duration,
+            AVG(p95_ms) as p95,
+            SUM(call_count) as call_count
+        FROM service_metrics
+        WHERE time_bucket >= $1 AND time_bucket < $2
+        GROUP BY service_name, operation_name
+        "#,
+        comparison_start,
+        comparison_end
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let baseline_map: HashMap<(String, String), _> = baseline_metrics
+        .into_iter()
+        .map(|m| {
+            (
+                (m.service_name.clone(), m.operation_name.clone()),
+                m,
+            )
+        })
+        .collect();
+
+    let mut results = Vec::new();
+
+    for comp in comparison_metrics {
+        let key = (comp.service_name.clone(), comp.operation_name.clone());
+        if let Some(base) = baseline_map.get(&key) {
+            let base_avg = base.avg_duration.unwrap_or(0.0);
+            let comp_avg = comp.avg_duration.unwrap_or(0.0);
+            let change_pct = if base_avg > 0.0 {
+                (comp_avg - base_avg) / base_avg * 100.0
+            } else {
+                0.0
+            };
+
+            results.push(BatchComparisonResult {
+                service_name: comp.service_name,
+                operation_name: comp.operation_name,
+                baseline_avg_duration: base_avg,
+                comparison_avg_duration: comp_avg,
+                duration_change_pct: change_pct,
+                baseline_p95: base.p95.unwrap_or(0.0),
+                comparison_p95: comp.p95.unwrap_or(0.0),
+                baseline_call_count: base.call_count.unwrap_or(0),
+                comparison_call_count: comp.call_count.unwrap_or(0),
+                is_regression: change_pct >= 20.0,
+            });
+        }
+    }
+
+    results.sort_by(|a, b| b.duration_change_pct.partial_cmp(&a.duration_change_pct).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(results)
 }

@@ -262,3 +262,64 @@ pub struct PaginatedResponse<T> {
     pub page_size: u32,
     pub total_pages: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AlertRule {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub service_name: Option<String>,
+    pub operation_name: Option<String>,
+    pub metric_type: String,
+    pub threshold: f64,
+    pub comparison_operator: String,
+    pub window_minutes: i32,
+    pub consecutive_windows: i32,
+    pub severity: String,
+    pub silence_minutes: i32,
+    pub is_active: bool,
+    pub last_triggered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AlertEvent {
+    pub id: Uuid,
+    pub rule_id: Uuid,
+    pub rule_name: String,
+    pub service_name: Option<String>,
+    pub operation_name: Option<String>,
+    pub metric_type: String,
+    pub metric_value: f64,
+    pub threshold: f64,
+    pub status: String,
+    pub trace_ids: Option<Vec<String>>,
+    pub acknowledged_by: Option<String>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub firing_started_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchComparisonRequest {
+    pub baseline_start: String,
+    pub baseline_end: String,
+    pub comparison_start: String,
+    pub comparison_end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchComparisonResult {
+    pub service_name: String,
+    pub operation_name: String,
+    pub baseline_avg_duration: f64,
+    pub comparison_avg_duration: f64,
+    pub duration_change_pct: f64,
+    pub baseline_p95: f64,
+    pub comparison_p95: f64,
+    pub baseline_call_count: i64,
+    pub comparison_call_count: i64,
+    pub is_regression: bool,
+}

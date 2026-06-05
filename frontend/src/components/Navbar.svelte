@@ -7,6 +7,7 @@
     { path: '/traces', label: 'Trace搜索', icon: '🔍' },
     { path: '/analysis', label: '性能分析', icon: '📈' },
     { path: '/slo', label: 'SLO监控', icon: '🎯' },
+    { path: '/alerts/rules', label: '告警中心', icon: '🔔' },
     { path: '/import', label: '数据导入', icon: '📤' },
   ]
 </script>

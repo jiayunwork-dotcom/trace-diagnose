@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/topology", handlers::topology_routes())
         .nest("/api/analysis", handlers::analysis_routes())
         .nest("/api/slo", handlers::slo_routes())
+        .nest("/api/alerts", handlers::alerts_routes())
         .nest("/api/import", handlers::import_routes())
         .layer(
             CorsLayer::new()
