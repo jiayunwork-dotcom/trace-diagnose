@@ -116,50 +116,79 @@
     return styles[status] || styles.healthy
   }
 
+  function clampScore(score) {
+    return Math.max(0, Math.min(100, score || 0))
+  }
+
   $: radarData = selectedService ? {
     labels: ['可用性', '延迟', '吞吐稳定性', '错误多样性'],
     datasets: [
       {
         label: '得分',
         data: [
-          selectedService.availability_score,
-          selectedService.latency_score,
-          selectedService.throughput_stability_score,
-          selectedService.error_diversity_score,
+          Math.max(0, Math.min(100, selectedService.availability_score || 0)),
+          Math.max(0, Math.min(100, selectedService.latency_score || 0)),
+          Math.max(0, Math.min(100, selectedService.throughput_stability_score || 0)),
+          Math.max(0, Math.min(100, selectedService.error_diversity_score || 0)),
         ],
         backgroundColor: 'rgba(59, 130, 246, 0.2)',
         borderColor: '#3b82f6',
         borderWidth: 2,
         pointBackgroundColor: '#3b82f6',
+        pointBorderColor: '#fff',
+        pointRadius: 4,
+        fill: true,
       },
     ],
   } : null
 
   $: radarOptions = {
     responsive: true,
+    maintainAspectRatio: true,
     scales: {
       r: {
+        type: 'radialLinear',
         beginAtZero: true,
+        min: 0,
         max: 100,
+        suggestedMin: 0,
+        suggestedMax: 100,
         ticks: {
           stepSize: 20,
           color: '#94a3b8',
+          backdropColor: 'transparent',
+          showLabelBackdrop: false,
         },
         grid: {
           color: 'rgba(148, 163, 184, 0.2)',
+          circular: true,
         },
         angleLines: {
-          color: 'rgba(148, 163, 184, 0.2)',
+          color: 'rgba(148, 163, 184, 0.3)',
+          lineWidth: 1,
         },
         pointLabels: {
           color: '#e2e8f0',
-          font: { size: 12 },
+          font: { size: 13, weight: '500' },
+          padding: 15,
         },
       },
     },
     plugins: {
       legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: function(context) {
+            return `${context.label}: ${context.raw.toFixed(1)}分`
+          }
+        }
+      }
     },
+    elements: {
+      line: {
+        tension: 0.1,
+      }
+    }
   }
 
   $: trendChartData = trendData.length > 0 ? {
@@ -256,7 +285,7 @@
               <div
                 class="service-card"
                 class:expanded={selectedService?.service_name === item.service_name}
-                style="border-left: 4px solid {getScoreColor(item.total_score)}"
+                style="border-left: 4px solid {getScoreColor(clampScore(item.total_score))}"
                 on:click={() => selectService(item)}
               >
                 <div class="card-header">
@@ -266,9 +295,9 @@
                       {getStatusBadge(item.status).text}
                     </span>
                   </div>
-                  <div class="score-circle" style="background: {getScoreBgColor(item.total_score)}">
-                    <span class="score-value" style="color: {getScoreColor(item.total_score)}">
-                      {item.total_score.toFixed(0)}
+                  <div class="score-circle" style="background: {getScoreBgColor(clampScore(item.total_score))}">
+                    <span class="score-value" style="color: {getScoreColor(clampScore(item.total_score))}">
+                      {clampScore(item.total_score).toFixed(0)}
                     </span>
                   </div>
                 </div>
@@ -277,30 +306,30 @@
                   <div class="score-bar-item">
                     <span class="bar-label">可用性</span>
                     <div class="bar-track">
-                      <div class="bar-fill" style="width: {item.availability_score}%; background: #22c55e"></div>
+                      <div class="bar-fill" style="width: {clampScore(item.availability_score)}%; background: #22c55e"></div>
                     </div>
-                    <span class="bar-value">{item.availability_score.toFixed(0)}</span>
+                    <span class="bar-value">{clampScore(item.availability_score).toFixed(0)}</span>
                   </div>
                   <div class="score-bar-item">
                     <span class="bar-label">延迟</span>
                     <div class="bar-track">
-                      <div class="bar-fill" style="width: {item.latency_score}%; background: #f59e0b"></div>
+                      <div class="bar-fill" style="width: {clampScore(item.latency_score)}%; background: #f59e0b"></div>
                     </div>
-                    <span class="bar-value">{item.latency_score.toFixed(0)}</span>
+                    <span class="bar-value">{clampScore(item.latency_score).toFixed(0)}</span>
                   </div>
                   <div class="score-bar-item">
                     <span class="bar-label">吞吐稳定</span>
                     <div class="bar-track">
-                      <div class="bar-fill" style="width: {item.throughput_stability_score}%; background: #8b5cf6"></div>
+                      <div class="bar-fill" style="width: {clampScore(item.throughput_stability_score)}%; background: #8b5cf6"></div>
                     </div>
-                    <span class="bar-value">{item.throughput_stability_score.toFixed(0)}</span>
+                    <span class="bar-value">{clampScore(item.throughput_stability_score).toFixed(0)}</span>
                   </div>
                   <div class="score-bar-item">
                     <span class="bar-label">错误多样</span>
                     <div class="bar-track">
-                      <div class="bar-fill" style="width: {item.error_diversity_score}%; background: #ec4899"></div>
+                      <div class="bar-fill" style="width: {clampScore(item.error_diversity_score)}%; background: #ec4899"></div>
                     </div>
-                    <span class="bar-value">{item.error_diversity_score.toFixed(0)}</span>
+                    <span class="bar-value">{clampScore(item.error_diversity_score).toFixed(0)}</span>
                   </div>
                 </div>
 

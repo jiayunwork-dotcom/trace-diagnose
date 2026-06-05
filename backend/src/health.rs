@@ -13,6 +13,7 @@ const THROUGHPUT_WEIGHT: f64 = 0.2;
 const ERROR_DIVERSITY_WEIGHT: f64 = 0.1;
 const WARNING_THRESHOLD: f64 = 60.0;
 const CAPACITY_WARNING_THRESHOLD_PCT: f64 = 20.0;
+const MAX_QPS_CAP: f64 = 10000.0;
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
@@ -227,9 +228,9 @@ pub async fn compute_health_scores(pool: &DbPool, target_service: Option<&str>) 
                 let score = if ratio <= 1.0 {
                     100.0
                 } else if ratio <= 2.0 {
-                    linear_interpolate(ratio, 1.0, 2.0, 100.0, 50.0)
+                    linear_interpolate(ratio, 1.0, 2.0, 50.0, 100.0)
                 } else if ratio <= 3.0 {
-                    linear_interpolate(ratio, 2.0, 3.0, 50.0, 0.0)
+                    linear_interpolate(ratio, 2.0, 3.0, 0.0, 50.0)
                 } else {
                     0.0
                 };
@@ -274,7 +275,7 @@ pub async fn compute_health_scores(pool: &DbPool, target_service: Option<&str>) 
                 let std_dev = variance.sqrt();
                 let cv = std_dev / mean;
                 
-                linear_interpolate(cv, 0.1, 0.5, 100.0, 0.0)
+                linear_interpolate(cv, 0.1, 0.5, 0.0, 100.0)
             } else {
                 100.0
             }
@@ -297,7 +298,7 @@ pub async fn compute_health_scores(pool: &DbPool, target_service: Option<&str>) 
         .await?;
 
         let error_count = error_types.len() as f64;
-        let error_diversity_score = linear_interpolate(error_count, 2.0, 10.0, 100.0, 0.0);
+        let error_diversity_score = linear_interpolate(error_count, 2.0, 10.0, 0.0, 100.0);
 
         let total_score = availability_score * AVAILABILITY_WEIGHT
             + latency_score * LATENCY_WEIGHT
@@ -452,8 +453,9 @@ pub async fn compute_capacity_plans(pool: &DbPool, target_service: Option<&str>)
         };
 
         let concurrent_limit = concurrent_peak_p95.max(1) as f64;
-        let avg_response_time_sec = avg_response_time_ms / 1000.0;
-        let max_qps = concurrent_limit / avg_response_time_sec;
+        let avg_response_time_sec = (avg_response_time_ms.max(1.0)) / 1000.0;
+        let theoretical_max_qps = concurrent_limit / avg_response_time_sec;
+        let max_qps = theoretical_max_qps.min(MAX_QPS_CAP);
         
         let remaining_capacity = (max_qps - current_qps).max(0.0);
         let remaining_pct = if current_qps > 0.0 {
