@@ -2,6 +2,7 @@ use crate::models::*;
 use crate::db::DbPool;
 use crate::analysis;
 use anyhow::{Result, Context};
+use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use chrono::{DateTime, Utc, TimeZone};
 use std::collections::HashMap;

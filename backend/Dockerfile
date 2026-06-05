@@ -4,13 +4,16 @@ WORKDIR /app
 
 RUN apk add --no-cache musl-dev openssl-dev perl make
 
+ENV SQLX_OFFLINE=true
+
 COPY Cargo.toml ./
 COPY .cargo ./.cargo
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release || true
 
 COPY src ./src
-RUN cargo build --release
+COPY .sqlx ./.sqlx
+RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
 

@@ -18,18 +18,18 @@ use std::time::Duration;
 pub fn traces_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_traces))
-        .route("/:id", get(get_trace))
-        .route("/:id/spans", get(get_trace_spans))
-        .route("/:id/critical-path", get(get_critical_path))
+        .route("/{id}", get(get_trace))
+        .route("/{id}/spans", get(get_trace_spans))
+        .route("/{id}/critical-path", get(get_critical_path))
         .route("/compare", get(compare_traces_handler))
 }
 
 pub fn services_routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_services))
-        .route("/:name", get(get_service_details))
-        .route("/:name/metrics", get(get_service_metrics))
-        .route("/:name/latency-distribution", get(get_latency_distribution_handler))
+        .route("/{name}", get(get_service_details))
+        .route("/{name}/metrics", get(get_service_metrics))
+        .route("/{name}/latency-distribution", get(get_latency_distribution_handler))
 }
 
 pub fn topology_routes() -> Router<AppState> {
@@ -41,17 +41,14 @@ pub fn analysis_routes() -> Router<AppState> {
     Router::new()
         .route("/latency-distribution", get(get_latency_distribution_handler))
         .route("/anomalies", get(list_anomalies))
-        .route("/critical-path/:trace_id", get(get_critical_path))
+        .route("/critical-path/{trace_id}", get(get_critical_path))
 }
 
 pub fn slo_routes() -> Router<AppState> {
     Router::new()
-        .route("/", get(list_slos))
-        .route("/", post(create_slo))
-        .route("/:id", get(get_slo))
-        .route("/:id", put(update_slo))
-        .route("/:id", delete(delete_slo))
-        .route("/:id/status", get(get_slo_status))
+        .route("/", get(list_slos).post(create_slo))
+        .route("/{id}", get(get_slo).put(update_slo).delete(delete_slo))
+        .route("/{id}/status", get(get_slo_status))
 }
 
 pub fn import_routes() -> Router<AppState> {
@@ -59,8 +56,8 @@ pub fn import_routes() -> Router<AppState> {
         .route("/upload", post(upload_file))
         .route("/push", post(push_spans))
         .route("/jobs", get(list_import_jobs))
-        .route("/jobs/:id", get(get_import_job))
-        .route("/jobs/:id/progress", get(get_import_progress))
+        .route("/jobs/{id}", get(get_import_job))
+        .route("/jobs/{id}/progress", get(get_import_progress))
 }
 
 pub async fn health_check() -> impl IntoResponse {
