@@ -10,6 +10,7 @@
   import AlertCenter from './pages/AlertCenter.svelte'
   import BatchCompare from './pages/BatchCompare.svelte'
   import Import from './pages/Import.svelte'
+  import ServiceHealth from './pages/ServiceHealth.svelte'
 </script>
 
 <Router>
@@ -25,6 +26,7 @@
       <Route path="/batch-compare" component={BatchCompare} />
       <Route path="/alerts" component={AlertCenter} />
       <Route path="/import" component={Import} />
+      <Route path="/service-health" component={ServiceHealth} />
     </main>
   </div>
 </Router>

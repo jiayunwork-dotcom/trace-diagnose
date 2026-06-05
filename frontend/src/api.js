@@ -63,4 +63,11 @@ export const evaluateAlerts = () => api.post('/alerts/evaluate')
 
 export const batchCompare = (params) => api.get('/analysis/batch-compare', { params })
 
+export const getHealthRankings = () => api.get('/health-score/rankings')
+export const getServiceHealthTrend = (serviceName, params = {}) => 
+  api.get(`/health-score/trends/${serviceName}`, { params })
+export const getCapacityPlans = () => api.get('/health-score/capacity')
+export const getHealthEvents = (params = {}) => api.get('/health-score/events', { params })
+export const computeHealthNow = (data = {}) => api.post('/health-score/compute', data)
+
 export default api

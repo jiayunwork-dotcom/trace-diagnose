@@ -2,6 +2,7 @@ use crate::AppState;
 use crate::models::*;
 use crate::importer;
 use crate::analysis;
+use crate::health;
 use axum::{
     extract::{Path, Query, State, Multipart},
     http::StatusCode,
@@ -985,4 +986,83 @@ pub async fn batch_compare_handler(
         .await
         .map(Json)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub fn health_routes() -> Router<AppState> {
+    Router::new()
+        .route("/rankings", get(get_health_rankings))
+        .route("/trends/{service_name}", get(get_service_health_trend))
+        .route("/capacity", get(get_capacity_plans))
+        .route("/events", get(get_health_events_handler))
+        .route("/compute", post(compute_health_now))
+}
+
+async fn get_health_rankings(
+    State(state): State<AppState>,
+) -> Json<Vec<HealthRankItem>> {
+    let rankings = health::get_health_rankings(&state.db)
+        .await
+        .unwrap_or_default();
+    Json(rankings)
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthTrendParams {
+    pub days: Option<i64>,
+}
+
+async fn get_service_health_trend(
+    State(state): State<AppState>,
+    Path(service_name): Path<String>,
+    Query(params): Query<HealthTrendParams>,
+) -> Json<Vec<HealthTrendPoint>> {
+    let days = params.days.unwrap_or(7);
+    let trends = health::get_service_health_trend(&state.db, &service_name, days)
+        .await
+        .unwrap_or_default();
+    Json(trends)
+}
+
+async fn get_capacity_plans(
+    State(state): State<AppState>,
+) -> Json<Vec<CapacityPlan>> {
+    let plans = health::get_latest_capacity_plans(&state.db)
+        .await
+        .unwrap_or_default();
+    Json(plans)
+}
+
+#[derive(Debug, Deserialize)]
+struct HealthEventsParams {
+    pub service: Option<String>,
+    pub limit: Option<i64>,
+}
+
+async fn get_health_events_handler(
+    State(state): State<AppState>,
+    Query(params): Query<HealthEventsParams>,
+) -> Json<Vec<HealthEvent>> {
+    let limit = params.limit.unwrap_or(50);
+    let events = health::get_health_events(&state.db, params.service.as_deref(), limit)
+        .await
+        .unwrap_or_default();
+    Json(events)
+}
+
+async fn compute_health_now(
+    State(state): State<AppState>,
+    Json(body): Json<ComputeHealthRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = state.db.clone();
+    let service_name = body.service_name.clone();
+    
+    tokio::spawn(async move {
+        let _ = health::run_full_health_computation(&db).await;
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "started",
+        "message": "Health computation started in background",
+        "service_name": service_name
+    })))
 }

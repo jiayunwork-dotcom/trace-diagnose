@@ -8,6 +8,7 @@
     { path: '/analysis', label: '性能分析', icon: '📈' },
     { path: '/batch-compare', label: '批量对比', icon: '⚖️' },
     { path: '/slo', label: 'SLO监控', icon: '🎯' },
+    { path: '/service-health', label: '服务健康', icon: '💚' },
     { path: '/alerts', label: '告警中心', icon: '🔔' },
     { path: '/import', label: '数据导入', icon: '📤' },
   ]

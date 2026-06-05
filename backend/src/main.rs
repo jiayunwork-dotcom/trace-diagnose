@@ -5,6 +5,7 @@ mod handlers;
 mod importer;
 mod analysis;
 mod cache;
+mod health;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -57,13 +58,26 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/slo", handlers::slo_routes())
         .nest("/api/alerts", handlers::alerts_routes())
         .nest("/api/import", handlers::import_routes())
+        .nest("/api/health-score", handlers::health_routes())
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
                 .allow_headers(Any),
         )
-        .with_state(app_state);
+        .with_state(app_state.clone());
+
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            tracing::info!("Running scheduled health computation...");
+            if let Err(e) = health::run_full_health_computation(&db_clone).await {
+                tracing::error!("Scheduled health computation failed: {}", e);
+            }
+        }
+    });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.port)).await?;
     tracing::info!("Server listening on port {}", config.port);

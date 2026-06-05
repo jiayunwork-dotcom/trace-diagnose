@@ -323,3 +323,100 @@ pub struct BatchComparisonResult {
     pub comparison_call_count: i64,
     pub is_regression: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct HealthBaseline {
+    pub id: Uuid,
+    pub service_name: String,
+    pub operation_name: String,
+    pub hour_of_day: i32,
+    pub baseline_p99_ms: f64,
+    pub data_points: i32,
+    pub last_updated: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct HealthScoreSnapshot {
+    pub id: Uuid,
+    pub service_name: String,
+    pub snapshot_time: DateTime<Utc>,
+    pub total_score: f64,
+    pub availability_score: f64,
+    pub latency_score: f64,
+    pub throughput_stability_score: f64,
+    pub error_diversity_score: f64,
+    pub availability_weight: f64,
+    pub latency_weight: f64,
+    pub throughput_weight: f64,
+    pub error_diversity_weight: f64,
+    pub raw_metrics: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CapacityPlan {
+    pub id: Uuid,
+    pub service_name: String,
+    pub snapshot_time: DateTime<Utc>,
+    pub current_qps: f64,
+    pub max_qps: f64,
+    pub remaining_capacity: f64,
+    pub avg_response_time_ms: f64,
+    pub concurrent_peak_p95: i32,
+    pub is_warning: bool,
+    pub warning_threshold_pct: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct HealthEvent {
+    pub id: Uuid,
+    pub event_type: String,
+    pub service_name: String,
+    pub severity: String,
+    pub message: String,
+    pub score: Option<f64>,
+    pub threshold: Option<f64>,
+    pub consecutive_hours: Option<i32>,
+    pub details: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthScoreDetail {
+    pub service_name: String,
+    pub total_score: f64,
+    pub availability_score: f64,
+    pub latency_score: f64,
+    pub throughput_stability_score: f64,
+    pub error_diversity_score: f64,
+    pub raw_metrics: serde_json::Value,
+    pub snapshot_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthTrendPoint {
+    pub snapshot_time: DateTime<Utc>,
+    pub total_score: f64,
+    pub availability_score: f64,
+    pub latency_score: f64,
+    pub throughput_stability_score: f64,
+    pub error_diversity_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthRankItem {
+    pub service_name: String,
+    pub total_score: f64,
+    pub availability_score: f64,
+    pub latency_score: f64,
+    pub throughput_stability_score: f64,
+    pub error_diversity_score: f64,
+    pub snapshot_time: DateTime<Utc>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComputeHealthRequest {
+    pub service_name: Option<String>,
+}
